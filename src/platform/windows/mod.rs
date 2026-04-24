@@ -47,6 +47,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use self::keycodes::key_from_vk;
+use crate::log;
 use crate::{Error, Event, EventKind, Key, tap::TapBuilder};
 
 /// US-layout physical scancodes that disambiguate left vs right Shift when
@@ -75,6 +76,7 @@ pub(crate) struct ShutdownGuard {
 
 impl Drop for ShutdownGuard {
     fn drop(&mut self) {
+        log::debug!("keytap: stopping Windows WH_KEYBOARD_LL hook");
         let tid = self.thread_id.load(Ordering::Acquire);
         if tid != 0 {
             // Wake the worker's GetMessageW. Safe: PostThreadMessageW is
@@ -90,6 +92,7 @@ impl Drop for ShutdownGuard {
 }
 
 pub(crate) fn start(tx: Sender<Event>, _cfg: &TapBuilder) -> Result<ShutdownGuard, Error> {
+    log::debug!("keytap: starting Windows WH_KEYBOARD_LL hook");
     let thread_id = Arc::new(AtomicU32::new(0));
     let thread_id_worker = thread_id.clone();
 
@@ -201,10 +204,16 @@ unsafe extern "system" fn raw_callback(code: i32, wparam: WPARAM, lparam: LPARAM
                     None
                 };
                 if let Some(kind) = kind {
-                    let _ = ctx.tx.try_send(Event {
-                        time: Instant::now(),
-                        kind,
-                    });
+                    if ctx
+                        .tx
+                        .try_send(Event {
+                            time: Instant::now(),
+                            kind,
+                        })
+                        .is_err()
+                    {
+                        log::trace!("keytap: channel full — dropping event");
+                    }
                 }
             }
         });

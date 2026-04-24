@@ -91,10 +91,16 @@ decl! {
     126 => MetaRight,
     127 => Menu,
 
+    // ISO layout: the extra key between LShift and Z (KEY_102ND).
+    86 => IntlBackslash,
+
     // Extended F keys
     183 => F13, 184 => F14, 185 => F15, 186 => F16,
     187 => F17, 188 => F18, 189 => F19, 190 => F20,
     191 => F21, 192 => F22, 193 => F23, 194 => F24,
+
+    // macOS-style Fn key — rare on PC keyboards, common on Apple hardware
+    464 => Function, // KEY_FN = 0x1D0
 }
 
 #[cfg(test)]

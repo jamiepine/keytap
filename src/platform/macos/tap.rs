@@ -45,6 +45,7 @@ use objc2_core_graphics::{
 };
 
 use super::keycodes::key_from_code;
+use crate::log;
 use crate::{Error, Event, EventKind, Key, tap::TapBuilder};
 
 #[link(name = "IOKit", kind = "framework")]
@@ -81,9 +82,12 @@ struct CallbackContext {
 
 /// Newtype wrapper so we can move a `CFRunLoop*` across threads.
 /// Sending a raw pointer and calling `CFRunLoopStop` from another thread
-/// is documented-safe.
+/// is documented-safe. `Sync` is justified the same way — the only time
+/// anyone touches this pointer is via `CFRunLoopStop` in `Drop`, which
+/// can be called from any thread.
 struct SendableRunLoopPtr(NonNull<CFRunLoop>);
 unsafe impl Send for SendableRunLoopPtr {}
+unsafe impl Sync for SendableRunLoopPtr {}
 
 /// Same story for the callback-context pointer: we move the `*mut` across
 /// threads but never dereference it concurrently — the worker installs it
@@ -118,6 +122,7 @@ impl std::fmt::Debug for ShutdownGuard {
 
 impl Drop for ShutdownGuard {
     fn drop(&mut self) {
+        log::debug!("keytap: stopping macOS CGEventTap");
         if let Some(rl) = self.run_loop.take() {
             // Safe: CFRunLoopStop is documented as thread-safe with respect
             // to the target run loop.
@@ -141,10 +146,12 @@ impl Drop for ShutdownGuard {
 }
 
 pub(crate) fn start(tx: Sender<Event>, cfg: &TapBuilder) -> Result<ShutdownGuard, Error> {
+    log::debug!("keytap: starting macOS CGEventTap");
     // Proactive permission check. On denial, fail fast with a typed error
     // instead of silently producing no events (the #1 rdev complaint).
     let access = unsafe { IOHIDCheckAccess(K_IOHID_REQUEST_TYPE_LISTEN) };
     if access != K_IOHID_ACCESS_TYPE_GRANTED {
+        log::debug!("keytap: IOHIDCheckAccess denied (access={})", access);
         return Err(Error::PermissionDenied);
     }
 
@@ -337,7 +344,9 @@ unsafe extern "C-unwind" fn raw_callback(
 
     if let Some(event) = maybe_event {
         // Non-blocking: if the consumer can't keep up, drop the event.
-        let _ = ctx.tx.try_send(event);
+        if ctx.tx.try_send(event).is_err() {
+            log::trace!("keytap: channel full — dropping event");
+        }
     }
 
     // ListenOnly — return value is ignored, but must be valid.

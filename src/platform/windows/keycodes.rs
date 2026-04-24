@@ -153,6 +153,9 @@ decl! {
     VK_OEM_5      = 0xDC => Backslash;
     VK_OEM_6      = 0xDD => BracketRight;
     VK_OEM_7      = 0xDE => Quote;
+    // ISO layout "\\|" between LShift and Z. Not present on ANSI keyboards.
+    // Windows has no user-visible VK for the macOS Fn key.
+    VK_OEM_102    = 0xE2 => IntlBackslash;
 }
 
 #[cfg(test)]

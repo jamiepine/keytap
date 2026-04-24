@@ -53,6 +53,7 @@ use crate::{Error, Event, EventKind, Key, Tap};
 
 /// A set of physical keys whose simultaneous-held state triggers a chord.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Chord {
     keys: HashSet<Key>,
 }
@@ -84,6 +85,7 @@ impl Chord {
 
 /// How a registered chord behaves once it becomes satisfied.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ChordMode {
     /// `Start` fires when the chord becomes satisfied; `End` fires when
     /// it no longer is (any chord key released) or when the held set
@@ -773,5 +775,32 @@ mod tests {
             ids(&out),
             vec!["start(\"m\")", "end(\"m\")", "start(\"t\")", "end(\"t\")"]
         );
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn serde_round_trips_chord_config() {
+        use crate::RawCode;
+
+        // The configuration case: a user stores their bindings on disk as
+        // JSON. We want Key / ChordMode / Chord round-tripping via serde_json.
+        let chord = Chord::of([Key::MetaRight, Key::AltRight, Key::IntlBackslash]);
+        let mode = ChordMode::Toggle;
+        let key = Key::Function;
+        let raw = RawCode(12345);
+
+        let chord_json = serde_json::to_string(&chord).unwrap();
+        let mode_json = serde_json::to_string(&mode).unwrap();
+        let key_json = serde_json::to_string(&key).unwrap();
+        let raw_json = serde_json::to_string(&raw).unwrap();
+
+        assert_eq!(chord, serde_json::from_str::<Chord>(&chord_json).unwrap());
+        assert_eq!(mode, serde_json::from_str::<ChordMode>(&mode_json).unwrap());
+        assert_eq!(key, serde_json::from_str::<Key>(&key_json).unwrap());
+        assert_eq!(raw, serde_json::from_str::<RawCode>(&raw_json).unwrap());
+
+        // Sanity: the key names are stable strings a user can hand-edit.
+        assert_eq!(mode_json, "\"Toggle\"");
+        assert_eq!(key_json, "\"Function\"");
     }
 }

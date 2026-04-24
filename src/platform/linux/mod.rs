@@ -38,6 +38,7 @@ use evdev::{Device, EventSummary, KeyCode};
 use nix::fcntl::{FcntlArg, OFlag, fcntl};
 use nix::libc;
 
+use crate::log;
 use crate::{Error, Event, EventKind, tap::TapBuilder};
 
 /// Marker key we probe for to decide whether an `event*` node is a
@@ -53,6 +54,7 @@ pub(crate) struct ShutdownGuard {
 
 impl Drop for ShutdownGuard {
     fn drop(&mut self) {
+        log::debug!("keytap: stopping Linux evdev tap");
         self.running.store(false, Ordering::Relaxed);
         if let Some(t) = self.thread.take() {
             let _ = t.join();
@@ -61,10 +63,12 @@ impl Drop for ShutdownGuard {
 }
 
 pub(crate) fn start(tx: Sender<Event>, cfg: &TapBuilder) -> Result<ShutdownGuard, Error> {
+    log::debug!("keytap: starting Linux evdev tap");
     let keyboards = find_keyboards()?;
     if keyboards.is_empty() {
         return Err(Error::NoDevices);
     }
+    log::debug!("keytap: opened {} keyboard device(s)", keyboards.len());
     let paths = keyboards
         .iter()
         .map(|(p, _)| p.clone())
@@ -116,10 +120,15 @@ fn run_worker(
                                 2 => EventKind::KeyRepeat(key),
                                 _ => continue,
                             };
-                            let _ = tx.try_send(Event {
-                                time: Instant::now(),
-                                kind,
-                            });
+                            if tx
+                                .try_send(Event {
+                                    time: Instant::now(),
+                                    kind,
+                                })
+                                .is_err()
+                            {
+                                log::trace!("keytap: channel full — dropping event");
+                            }
                         }
                     }
                 }
@@ -221,6 +230,10 @@ fn adopt_new_keyboards(devices: &mut Vec<Device>, known: &mut HashSet<PathBuf>) 
     if new_devices.is_empty() {
         return;
     }
+    log::debug!(
+        "keytap: adopting {} new keyboard device(s) via hotplug",
+        new_devices.len()
+    );
     // Give newly-appeared devices a moment to fully initialize —
     // hotkey-listener found this necessary in practice for Bluetooth.
     thread::sleep(Duration::from_millis(100));

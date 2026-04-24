@@ -115,6 +115,10 @@ const F19: u32 = 80;
 const F20: u32 = 90;
 // F21–F24 have no kVK_* constants on Apple keyboards.
 
+// ISO / layout extras
+const ISO_SECTION: u32 = 10; // kVK_ISO_Section — physical key between LShift and Z on ISO
+const FUNCTION: u32 = 63; // kVK_Function — macOS Fn
+
 // Numpad
 const NUMPAD_DECIMAL: u32 = 65;
 const NUMPAD_MULTIPLY: u32 = 67;
@@ -253,6 +257,9 @@ pub(crate) fn key_from_code(code: u32) -> Key {
         NUMPAD_ENTER => Key::NumpadEnter,
         NUMPAD_DECIMAL => Key::NumpadDecimal,
         NUM_LOCK => Key::NumLock,
+
+        ISO_SECTION => Key::IntlBackslash,
+        FUNCTION => Key::Function,
 
         other => Key::Unknown(RawCode(other)),
     }

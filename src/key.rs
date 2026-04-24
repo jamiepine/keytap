@@ -9,6 +9,7 @@
 /// Use [`Key::Unknown`] for scancodes that keytap doesn't have a named
 /// variant for yet.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub enum Key {
     // Letters (positional, QWERTY)
@@ -147,6 +148,14 @@ pub enum Key {
     Pause,
     Menu,
 
+    /// ISO-layout key between Left Shift and Z. Absent on ANSI (US)
+    /// keyboards but present on most European / Japanese layouts.
+    IntlBackslash,
+
+    /// macOS Fn key. The key is firmware-level on Windows and doesn't
+    /// surface to the OS; on Linux it appears as `KEY_FN` (0x1D0 = 464).
+    Function,
+
     /// Escape hatch for any scancode keytap doesn't recognize. Always
     /// emitted, never silently dropped.
     Unknown(RawCode),
@@ -155,4 +164,5 @@ pub enum Key {
 /// A raw, platform-specific scancode. On macOS this is a `kVK_*` virtual
 /// keycode; on Windows a virtual-key code; on Linux an evdev `KEY_*` code.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RawCode(pub u32);
