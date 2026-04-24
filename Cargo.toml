@@ -1,0 +1,47 @@
+[package]
+name = "keytap"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+description = "Cross-platform, observe-only global keyboard taps with left/right modifier fidelity and clean shutdown"
+repository = "https://github.com/jamiepine/keytap"
+keywords = ["keyboard", "hotkey", "global", "input", "evdev"]
+categories = ["os", "hardware-support", "api-bindings"]
+readme = "README.md"
+
+[features]
+default = ["chord"]
+chord = []
+tracing = ["dep:tracing"]
+serde = ["dep:serde"]
+
+[dependencies]
+crossbeam-channel = "0.5"
+thiserror = "2"
+tracing = { version = "0.1", optional = true }
+serde = { version = "1", optional = true, features = ["derive"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSAutoreleasePool"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFRunLoop", "CFMachPort"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGEvent", "CGEventTypes"] }
+libc = "0.2"
+
+[target.'cfg(target_os = "windows")'.dependencies.windows-sys]
+version = "0.59"
+features = [
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_System_LibraryLoader",
+]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+evdev = "0.13"
+nix = { version = "0.29", features = ["poll", "event"] }
+
+[dev-dependencies]
+anyhow = "1"
