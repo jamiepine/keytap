@@ -25,14 +25,18 @@ use keytap::chord::{ChordMatcher, Chord, ChordEvent};
 use keytap::Key;
 
 let matcher = ChordMatcher::builder()
+    // Momentary (default): End fires when any chord key is released.
     .add("ptt", Chord::of([Key::MetaRight, Key::AltRight]))
+    // Toggle: End fires on the NEXT complete press. Stays active
+    // between presses; other chords are suppressed while it's active.
+    .add_toggle("hands-free",
+                Chord::of([Key::MetaRight, Key::AltRight, Key::Space]))
     .build()?;
 
 while let Ok(event) = matcher.recv() {
     match event {
-        ChordEvent::Start { id: "ptt", .. } => start_recording(),
-        ChordEvent::End   { id: "ptt", .. } => stop_recording(),
-        _ => {}
+        ChordEvent::Start { id, .. } => start_recording(id),
+        ChordEvent::End   { id, .. } => stop_recording(id),
     }
 }
 ```

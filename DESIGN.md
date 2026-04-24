@@ -271,11 +271,20 @@ Semantics:
 - A chord is a **set** of keys. Order doesn't matter for activation.
 - `Start` fires when all chord keys are held AND no other non-chord keys are
   held. (Configurable — see `ChordBuilder::allow_extra`.)
-- `End` fires when any chord key is released.
 - If the user transitions directly from chord A to chord B (partially
   overlapping), End(A) fires before Start(B). Never overlapping `Start` events.
 - Ambiguity resolution: if two registered chords match the current key set,
   the one with more keys wins (longest match).
+
+Each registered chord carries a `ChordMode`:
+- `ChordMode::Momentary` (default) — `End` fires when any chord key is
+  released, or when the held set transitions into a different registered
+  chord. Standard push-to-talk / hotkey-daemon behaviour.
+- `ChordMode::Toggle` — `Start` fires on the first complete press; `End`
+  fires on the *next* complete press of the same chord. Key releases
+  between presses are ignored (the chord is sticky). While a Toggle chord
+  is active, other registered chords are suppressed until it ends.
+  Register with `.add_toggle(id, chord)`.
 
 Internal state machine:
 ```

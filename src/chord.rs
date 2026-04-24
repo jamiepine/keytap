@@ -9,6 +9,15 @@
 //! Ambiguity resolution: if two registered chords match the current held
 //! set, the chord with more keys wins (longest match).
 //!
+//! Each chord carries a [`ChordMode`]:
+//! - [`ChordMode::Momentary`] (default) — `End` fires when any chord key
+//!   is released. Standard push-to-talk / hotkey behaviour.
+//! - [`ChordMode::Toggle`] — `Start` fires on the first complete chord
+//!   press, `End` fires on the *next* complete press of the same chord.
+//!   Key releases between presses are ignored; the chord stays active
+//!   until explicitly re-pressed. While a Toggle chord is active, other
+//!   registered chords are suppressed.
+//!
 //! ```no_run
 //! use keytap::chord::{ChordMatcher, Chord, ChordEvent};
 //! use keytap::Key;
@@ -16,6 +25,8 @@
 //! # fn main() -> Result<(), keytap::Error> {
 //! let matcher = ChordMatcher::builder()
 //!     .add("ptt",    Chord::of([Key::MetaRight, Key::AltRight]))
+//!     .add_toggle("hands-free",
+//!                 Chord::of([Key::MetaRight, Key::AltRight, Key::Space]))
 //!     .add("cancel", Chord::of([Key::Escape]))
 //!     .build()?;
 //!
@@ -69,6 +80,26 @@ impl Chord {
     fn matches(&self, held: &HashSet<Key>) -> bool {
         !self.keys.is_empty() && self.keys.is_subset(held)
     }
+}
+
+/// How a registered chord behaves once it becomes satisfied.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum ChordMode {
+    /// `Start` fires when the chord becomes satisfied; `End` fires when
+    /// it no longer is (any chord key released) or when the held set
+    /// transitions to a different registered chord. The default — this
+    /// is how push-to-talk and standard hotkey-daemon chords behave.
+    #[default]
+    Momentary,
+    /// `Start` fires on the first complete press; `End` fires on the
+    /// *next* complete press of the same chord. Key releases between
+    /// presses are ignored — the chord stays active until explicitly
+    /// re-pressed. While a Toggle chord is active, other registered
+    /// chords do not fire (the active chord is "sticky").
+    ///
+    /// Useful for hands-free sessions where the user shouldn't have to
+    /// hold keys for minutes at a time.
+    Toggle,
 }
 
 /// Events emitted by a [`ChordMatcher`].
@@ -126,13 +157,26 @@ impl<Id: Clone + Debug + Eq + Hash + Send + 'static> Drop for ChordMatcher<Id> {
 
 #[derive(Debug)]
 pub struct ChordMatcherBuilder<Id: Clone + Debug + Eq + Hash + Send + 'static> {
-    registered: Vec<(Id, Chord)>,
+    registered: Vec<(Id, Chord, ChordMode)>,
     tap: Option<Tap>,
 }
 
 impl<Id: Clone + Debug + Eq + Hash + Send + 'static> ChordMatcherBuilder<Id> {
-    pub fn add(mut self, id: Id, chord: Chord) -> Self {
-        self.registered.push((id, chord));
+    /// Register a chord in [`ChordMode::Momentary`] (the default).
+    pub fn add(self, id: Id, chord: Chord) -> Self {
+        self.add_with_mode(id, chord, ChordMode::Momentary)
+    }
+
+    /// Register a chord in [`ChordMode::Toggle`]. The chord stays active
+    /// between presses; the next complete press ends it.
+    pub fn add_toggle(self, id: Id, chord: Chord) -> Self {
+        self.add_with_mode(id, chord, ChordMode::Toggle)
+    }
+
+    /// Register a chord with an explicit [`ChordMode`]. Lower-level form
+    /// of [`Self::add`] / [`Self::add_toggle`].
+    pub fn add_with_mode(mut self, id: Id, chord: Chord, mode: ChordMode) -> Self {
+        self.registered.push((id, chord, mode));
         self
     }
 
@@ -191,20 +235,25 @@ impl<Id: Clone + Debug + Eq + Hash + Send + 'static> ChordMatcherBuilder<Id> {
 /// Pure state machine. All platform-free; directly unit-testable.
 ///
 /// Call [`MatcherState::process`] with each [`Event`] from the tap; it
-/// invokes the callback with zero or one [`ChordEvent`] per call.
+/// invokes the callback with zero or more [`ChordEvent`]s per call
+/// (typically zero or one; mode transitions can emit End + Start).
 #[derive(Debug)]
 pub(crate) struct MatcherState<Id: Clone + Debug + Eq + Hash> {
-    registered: Vec<(Id, Chord)>,
+    registered: Vec<(Id, Chord, ChordMode)>,
     held: HashSet<Key>,
-    active: Option<Id>,
+    active: Option<(Id, ChordMode)>,
+    /// Indices of chords that were satisfied at the end of the previous
+    /// tick. Used for rising-edge detection (Toggle re-press).
+    satisfied_prev: HashSet<usize>,
 }
 
 impl<Id: Clone + Debug + Eq + Hash> MatcherState<Id> {
-    pub(crate) fn new(registered: Vec<(Id, Chord)>) -> Self {
+    pub(crate) fn new(registered: Vec<(Id, Chord, ChordMode)>) -> Self {
         Self {
             registered,
             held: HashSet::new(),
             active: None,
+            satisfied_prev: HashSet::new(),
         }
     }
 
@@ -219,17 +268,49 @@ impl<Id: Clone + Debug + Eq + Hash> MatcherState<Id> {
             EventKind::KeyRepeat(_) => return, // edge-triggered; ignore
         }
 
+        let satisfied_now = self.satisfied_indices();
+        let rising: Vec<usize> = satisfied_now
+            .difference(&self.satisfied_prev)
+            .copied()
+            .collect();
+        self.satisfied_prev = satisfied_now;
+
+        // Toggle is sticky: while a Toggle chord is active, the only
+        // event that can fire is End(same chord) triggered by another
+        // complete press. Other chord activity is suppressed.
+        if let Some((active_id, ChordMode::Toggle)) = self.active.clone() {
+            for &idx in &rising {
+                if self.registered[idx].0 == active_id {
+                    emit(ChordEvent::End {
+                        id: active_id,
+                        time: event.time,
+                    });
+                    self.active = None;
+                    return;
+                }
+            }
+            return;
+        }
+
+        // Momentary path (or no active chord): recompute longest match
+        // from the currently-satisfied set. Transition End→Start across
+        // chord boundaries exactly as before.
         let new_match = self.longest_match();
-        if new_match != self.active {
-            if let Some(prev) = self.active.take() {
+        let same_id = match (&new_match, &self.active) {
+            (Some((a, _)), Some((b, _))) => a == b,
+            (None, None) => true,
+            _ => false,
+        };
+        if !same_id {
+            if let Some((prev_id, _)) = self.active.take() {
                 emit(ChordEvent::End {
-                    id: prev,
+                    id: prev_id,
                     time: event.time,
                 });
             }
-            if let Some(next) = new_match.clone() {
+            if let Some((next_id, _)) = &new_match {
                 emit(ChordEvent::Start {
-                    id: next,
+                    id: next_id.clone(),
                     time: event.time,
                 });
             }
@@ -237,20 +318,30 @@ impl<Id: Clone + Debug + Eq + Hash> MatcherState<Id> {
         }
     }
 
+    /// Indices into `registered` for every chord that's currently satisfied.
+    fn satisfied_indices(&self) -> HashSet<usize> {
+        self.registered
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, c, _))| c.matches(&self.held))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
     /// Longest-match resolution: if multiple chords match the held set,
     /// prefer the one with more keys. Ties broken by registration order
     /// (earlier wins).
-    fn longest_match(&self) -> Option<Id> {
+    fn longest_match(&self) -> Option<(Id, ChordMode)> {
         let max_len = self
             .registered
             .iter()
-            .filter(|(_, c)| c.matches(&self.held))
-            .map(|(_, c)| c.len())
+            .filter(|(_, c, _)| c.matches(&self.held))
+            .map(|(_, c, _)| c.len())
             .max()?;
         self.registered
             .iter()
-            .find(|(_, c)| c.len() == max_len && c.matches(&self.held))
-            .map(|(id, _)| id.clone())
+            .find(|(_, c, _)| c.len() == max_len && c.matches(&self.held))
+            .map(|(id, _, mode)| (id.clone(), *mode))
     }
 }
 
@@ -281,6 +372,17 @@ mod tests {
 
     fn run<Id: Clone + Debug + Eq + Hash>(
         registered: Vec<(Id, Chord)>,
+        events: Vec<Event>,
+    ) -> Vec<ChordEvent<Id>> {
+        let tagged = registered
+            .into_iter()
+            .map(|(id, c)| (id, c, ChordMode::Momentary))
+            .collect();
+        run_with_modes(tagged, events)
+    }
+
+    fn run_with_modes<Id: Clone + Debug + Eq + Hash>(
+        registered: Vec<(Id, Chord, ChordMode)>,
         events: Vec<Event>,
     ) -> Vec<ChordEvent<Id>> {
         let mut state = MatcherState::new(registered);
@@ -459,5 +561,217 @@ mod tests {
             vec![down(Key::A), up(Key::A)],
         );
         assert!(out.is_empty());
+    }
+
+    // ── Toggle mode ─────────────────────────────────────────────────────
+
+    #[test]
+    fn toggle_stays_active_through_key_release() {
+        // First press → Start. Keys released → no End (sticky).
+        let out = run_with_modes(
+            vec![("t", Chord::of([Key::A]), ChordMode::Toggle)],
+            vec![down(Key::A), up(Key::A)],
+        );
+        assert_eq!(ids(&out), vec!["start(\"t\")"]);
+    }
+
+    #[test]
+    fn toggle_ends_on_second_complete_press() {
+        // Press → Start. Release → silent. Press again → End.
+        let out = run_with_modes(
+            vec![("t", Chord::of([Key::A]), ChordMode::Toggle)],
+            vec![
+                down(Key::A),
+                up(Key::A),
+                down(Key::A), // re-press: this is the "off" toggle
+                up(Key::A),
+            ],
+        );
+        assert_eq!(ids(&out), vec!["start(\"t\")", "end(\"t\")"]);
+    }
+
+    #[test]
+    fn toggle_multi_key_requires_all_keys_for_repress() {
+        // Two-key toggle: releasing one key and re-pressing it does not
+        // count as a full chord press, so End should NOT fire until all
+        // chord keys transition unsatisfied → satisfied.
+        let out = run_with_modes(
+            vec![(
+                "t",
+                Chord::of([Key::MetaRight, Key::AltRight]),
+                ChordMode::Toggle,
+            )],
+            vec![
+                down(Key::MetaRight),
+                down(Key::AltRight), // satisfied → Start
+                up(Key::AltRight),   // unsatisfied (sticky, no End)
+                down(Key::AltRight), // re-satisfied → End
+                up(Key::AltRight),
+                up(Key::MetaRight),
+            ],
+        );
+        assert_eq!(ids(&out), vec!["start(\"t\")", "end(\"t\")"]);
+    }
+
+    #[test]
+    fn toggle_suppresses_other_chords_while_active() {
+        // While a Toggle chord is sticky-active, other registered chords
+        // don't fire — the active session takes precedence until ended.
+        let out = run_with_modes(
+            vec![
+                ("hands_free", Chord::of([Key::Space]), ChordMode::Toggle),
+                ("cancel", Chord::of([Key::Escape]), ChordMode::Momentary),
+            ],
+            vec![
+                down(Key::Space), // Start("hands_free")
+                up(Key::Space),
+                down(Key::Escape), // would fire "cancel" if toggle weren't active
+                up(Key::Escape),
+                down(Key::Space), // End("hands_free")
+                up(Key::Space),
+            ],
+        );
+        assert_eq!(
+            ids(&out),
+            vec!["start(\"hands_free\")", "end(\"hands_free\")"]
+        );
+    }
+
+    #[test]
+    fn ptt_upgrades_to_toggle_by_longest_match() {
+        // Classic voicebox pattern: PTT [Meta, Alt] (Momentary) and
+        // Hands-free [Meta, Alt, Space] (Toggle). Hold PTT, then tap
+        // Space mid-hold → End(ptt), Start(hands_free) in Toggle mode.
+        // Then release all keys without pressing the chord again, so
+        // Toggle stays sticky-active (no End).
+        let out = run_with_modes(
+            vec![
+                (
+                    "ptt",
+                    Chord::of([Key::MetaRight, Key::AltRight]),
+                    ChordMode::Momentary,
+                ),
+                (
+                    "hands_free",
+                    Chord::of([Key::MetaRight, Key::AltRight, Key::Space]),
+                    ChordMode::Toggle,
+                ),
+            ],
+            vec![
+                down(Key::MetaRight),
+                down(Key::AltRight), // Start("ptt")
+                down(Key::Space),    // upgrade: End("ptt"), Start("hands_free")
+                up(Key::Space),      // Toggle sticky — nothing
+                up(Key::AltRight),
+                up(Key::MetaRight), // all released, still Toggle-active
+            ],
+        );
+        assert_eq!(
+            ids(&out),
+            vec!["start(\"ptt\")", "end(\"ptt\")", "start(\"hands_free\")",]
+        );
+    }
+
+    #[test]
+    fn toggle_end_while_ptt_held_reenters_ptt() {
+        // After a Toggle ends, longest_match runs normally against the
+        // still-held keys. If the user was holding the full superset
+        // chord (Meta+Alt+Space), ending the Toggle leaves Meta+Alt
+        // held, so the shorter Momentary chord ("ptt") re-activates.
+        // Pin this behaviour — it's the natural consequence of the
+        // longest-match rule and matches what dictation apps expect
+        // (a Toggle end while PTT keys are held keeps the recording
+        // going via PTT). Release order matters: Space first ends
+        // Toggle and immediately reveals PTT; releasing Meta/Alt ends
+        // PTT too.
+        let out = run_with_modes(
+            vec![
+                (
+                    "ptt",
+                    Chord::of([Key::MetaRight, Key::AltRight]),
+                    ChordMode::Momentary,
+                ),
+                (
+                    "hands_free",
+                    Chord::of([Key::MetaRight, Key::AltRight, Key::Space]),
+                    ChordMode::Toggle,
+                ),
+            ],
+            vec![
+                down(Key::MetaRight),
+                down(Key::AltRight), // Start("ptt")
+                down(Key::Space),    // End("ptt"), Start("hands_free")
+                up(Key::Space),      // Toggle sticky, nothing
+                down(Key::Space),    // re-press → End("hands_free")
+                up(Key::Space),      // satisfied drops to {ptt} → Start("ptt")
+                up(Key::AltRight),   // End("ptt")
+                up(Key::MetaRight),
+            ],
+        );
+        assert_eq!(
+            ids(&out),
+            vec![
+                "start(\"ptt\")",
+                "end(\"ptt\")",
+                "start(\"hands_free\")",
+                "end(\"hands_free\")",
+                "start(\"ptt\")",
+                "end(\"ptt\")",
+            ]
+        );
+    }
+
+    #[test]
+    fn toggle_start_requires_rising_edge() {
+        // If the chord is already satisfied when the matcher starts (e.g.
+        // registered after the user pressed the key — not a real case
+        // with our API, but the invariant is worth pinning), Start
+        // should fire on the rising edge, not on the first event.
+        // Here: press A, release A, press A again — expect start, end.
+        let out = run_with_modes(
+            vec![("t", Chord::of([Key::A]), ChordMode::Toggle)],
+            vec![down(Key::A), up(Key::A), down(Key::A), up(Key::A)],
+        );
+        assert_eq!(ids(&out), vec!["start(\"t\")", "end(\"t\")"]);
+    }
+
+    #[test]
+    fn toggle_ignores_key_repeat_events() {
+        // Repeats inside an active Toggle session must not count as a
+        // re-press — the OS may emit KeyRepeat while keys are held.
+        let out = run_with_modes(
+            vec![("t", Chord::of([Key::A]), ChordMode::Toggle)],
+            vec![
+                down(Key::A),
+                repeat(Key::A),
+                repeat(Key::A),
+                up(Key::A),
+                // Repeats alone should not produce a re-press signal.
+            ],
+        );
+        assert_eq!(ids(&out), vec!["start(\"t\")"]);
+    }
+
+    #[test]
+    fn momentary_and_toggle_coexist_independently_when_no_active() {
+        // With no toggle active, Momentary chord behaves normally.
+        let out = run_with_modes(
+            vec![
+                ("m", Chord::of([Key::A]), ChordMode::Momentary),
+                ("t", Chord::of([Key::B]), ChordMode::Toggle),
+            ],
+            vec![
+                down(Key::A), // Start("m")
+                up(Key::A),   // End("m")
+                down(Key::B), // Start("t")
+                up(Key::B),   // sticky, no End
+                down(Key::B), // End("t")
+                up(Key::B),
+            ],
+        );
+        assert_eq!(
+            ids(&out),
+            vec!["start(\"m\")", "end(\"m\")", "start(\"t\")", "end(\"t\")"]
+        );
     }
 }
