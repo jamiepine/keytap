@@ -353,12 +353,11 @@ unsafe extern "C-unwind" fn raw_callback(
     cg_event.as_ptr()
 }
 
-/// Read `kCGEventFlags` field (raw `0x81`) from a CGEvent. objc2-core-graphics
-/// exposes an integer-field accessor; we use the numeric field id because
-/// `kCGEventFlags` isn't in the `CGEventField` enum.
+/// Read `CGEventFlags` from a CGEvent. `CGEventGetFlags` is the only path —
+/// flags do not have a `CGEventField` id, so `CGEventGetIntegerValueField`
+/// silently returns 0 for them.
 fn cg_event_flags(event: &CGEvent) -> u64 {
-    const FLAGS_FIELD: CGEventField = CGEventField(0x81);
-    CGEvent::integer_value_field(Some(event), FLAGS_FIELD) as u64
+    CGEvent::flags(Some(event)).0
 }
 
 /// Map a modifier [`Key`] to the CGEventFlags bit that represents its
